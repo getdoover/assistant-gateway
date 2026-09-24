@@ -1,4 +1,4 @@
-name: Publish Doover App
+name: Doover App
 
 on:
   push:
