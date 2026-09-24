@@ -1,1 +1,6 @@
-.venv
+target
+.git
+.github
+.idea
+deployment
+*.md

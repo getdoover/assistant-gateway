@@ -1,0 +1,47 @@
+[package]
+name = "assistant-gateway"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Run arbitrary sh commands on the device host over RPC"
+
+[lib]
+name = "assistant_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "assistant-gateway"
+path = "src/main.rs"
+
+[dependencies]
+# The Rust equivalent of pydoover, pinned to a revision for reproducible builds
+# (switch to a version tag once doover-rs starts cutting releases).
+doover = { git = "https://github.com/getdoover/doover-rs", rev = "63f3281c4b79c573cacaa14aab37be3969788c80" }
+
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "signal",
+    "time",
+    "sync",
+    "io-util",
+] }
+# preserve_order matches doover-rs: JSON object key order == Python dict
+# insertion order, so the response reads the same as the Python app's did.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# setsid / killpg, and setns to join the host's namespaces.
+libc = "0.2"
+
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+doover = { git = "https://github.com/getdoover/doover-rs", rev = "63f3281c4b79c573cacaa14aab37be3969788c80", features = ["testing"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

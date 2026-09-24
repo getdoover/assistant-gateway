@@ -10,7 +10,7 @@
         "depends_on": [],
         "organisation_id": null,
         "image_name": "registry.doover.com/apps/assistant_gateway:main",
-        "build_args": "--platform linux/amd64,linux/arm64",
+        "build_args": "--platform linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6",
         "export_ui_command": "NO_EXPORT"
     }
 }

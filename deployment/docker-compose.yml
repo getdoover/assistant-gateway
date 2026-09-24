@@ -2,8 +2,9 @@ services:
   assistant_gateway:
     image: registry.doover.com/apps/assistant_gateway:main
     restart: unless-stopped
-    # pid: host + privileged let `nsenter -t 1` join the host's namespaces, so
-    # commands run on the host as root rather than inside this container.
+    # pid: host + privileged let the app join the host's namespaces (setns into
+    # PID 1's), so commands run on the host as root rather than inside this
+    # container.
     privileged: true
     pid: host
     network_mode: host

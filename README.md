@@ -1,7 +1,7 @@
 # Assistant Gateway
 
 Runs arbitrary `sh` commands on a Linux Doover device, requested over RPC.
-Commands run **on the host, as root** (via `nsenter` into PID 1's namespaces),
+Commands run **on the host, as root** (the app joins PID 1's namespaces),
 so this app is effectively remote root shell access to the device. Install it
 only on devices where everyone who can write to the device's channels should
 have that.
@@ -26,8 +26,14 @@ Response:
  "stdout_truncated": false, "stderr_truncated": false}
 ```
 
-`exit_code` is `null` when the command was killed by a timeout or cancellation.
-The whole process group is killed, so background children go too.
+`exit_code` is `null` when the command was killed by a timeout or
+cancellation, and negative (`-9`) when it died to a signal of its own. The
+whole process group is killed, so background children go too.
+
+The timeout covers the command's output as well as the command: a background
+child still holding stdout/stderr (`daemon &`) keeps the call open until the
+timeout, and is then killed. Redirect its output (`daemon >/dev/null 2>&1 &`)
+to leave it running and return straight away.
 
 ### Streaming
 
@@ -70,5 +76,22 @@ result = await self.rpc.call(
 
 ## Deployment
 
-The container needs `privileged: true` and `pid: host` for `nsenter -t 1` —
-see `deployment/docker-compose.yml`.
+The container needs `privileged: true` and `pid: host` to join the host's
+namespaces — see `deployment/docker-compose.yml`. Without `pid: host`, PID 1
+is the container's own init, and commands quietly run in the container.
+
+## Development
+
+Written in Rust on [doover-rs](https://github.com/getdoover/doover-rs).
+
+```bash
+cargo test                                   # tests
+cargo run -- export doover_config.json --app-name assistant_gateway   # preview config schema
+```
+
+The host-namespace test needs a privileged Linux container:
+
+```bash
+docker run --rm --privileged --pid=host -v "$PWD":/src -w /src rust:1 \
+  cargo test --test executor -- --ignored
+```
