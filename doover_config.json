@@ -1,0 +1,16 @@
+{
+    "assistant_gateway": {
+        "name": "assistant_gateway",
+        "display_name": "Assistant Gateway",
+        "type": "DEV",
+        "visibility": "COR",
+        "allow_many": false,
+        "description": "Run arbitrary sh commands on the device host over RPC",
+        "long_description": "README.md",
+        "depends_on": [],
+        "organisation_id": null,
+        "image_name": "registry.doover.com/apps/assistant_gateway:main",
+        "build_args": "--platform linux/amd64,linux/arm64",
+        "export_ui_command": "NO_EXPORT"
+    }
+}
