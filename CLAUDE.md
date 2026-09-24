@@ -1,7 +1,7 @@
 # Assistant Gateway
 
 Doover device app that runs arbitrary `sh` commands on the host over RPC
-(`exec` on `dv-rpc`), built on pydoover 1.0. See `README.md` for the interface.
+(`exec` on `dv-assistant-gateway`), built on pydoover 1.0. See `README.md` for the interface.
 
 ## Commands
 
@@ -22,6 +22,9 @@ src/assistant_gateway/
 
 ## Things worth knowing
 
+- The RPC channel is config (`rpc_channel`), so `exec` is registered
+  channel-less and `setup()` subscribes the configured channel; the handler
+  rejects requests from any other channel.
 - Host execution is `nsenter -t 1 -m -u -i -n -p -- sh -c ...`, which needs
   `privileged` + `pid: host`. The base image is Alpine, so `nsenter` comes from
   `util-linux-misc` (added in the Dockerfile).

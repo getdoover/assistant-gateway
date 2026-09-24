@@ -4,6 +4,14 @@ from pydoover import config
 
 
 class AssistantGatewayConfig(config.Schema):
+    rpc_channel = config.String(
+        "RPC Channel",
+        name="rpc_channel",
+        default="dv-assistant-gateway",
+        advanced=True,
+        description="Channel this app listens on for exec requests.",
+    )
+
     run_on_host = config.Boolean(
         "Run On Host",
         name="run_on_host",

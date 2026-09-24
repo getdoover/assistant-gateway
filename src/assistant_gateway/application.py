@@ -11,9 +11,6 @@ from .executor import LiveOutput, run_command
 
 log = logging.getLogger(__name__)
 
-#: Handlers must name their channel explicitly or they never get subscribed.
-RPC_CHANNEL = rpc.DEFAULT_CHANNEL
-
 #: Longest gap between progress updates even with no new output, so the site
 #: doesn't give up on a quiet command as "no response from device".
 HEARTBEAT_INTERVAL = 10
@@ -31,7 +28,10 @@ class AssistantGatewayApplication(Application):
     loop_target_period = 10
 
     async def setup(self):
-        pass
+        # The channel comes from config, so it can't go in the @rpc.handler
+        # decorator: the handler is registered channel-less and we subscribe
+        # to the configured channel here instead.
+        self.rpc.subscribe(self.config.rpc_channel.value)
 
     async def main_loop(self):
         pass
@@ -48,13 +48,19 @@ class AssistantGatewayApplication(Application):
             raise rpc.RPCError("INVALID_PARAMS", "'timeout' must be greater than zero")
         return min(requested, max_timeout)
 
-    @rpc.handler("exec", channel=RPC_CHANNEL)
+    @rpc.handler("exec")
     async def rpc_exec(self, ctx, payload: dict) -> dict:
         """Run ``payload["command"]`` with ``sh -c``.
 
         Optional: ``timeout`` (s), ``cwd``, ``env`` (dict), ``stdin`` (str).
         A timed-out or cancelled command is killed along with its children.
         """
+        # A channel-less handler serves every channel the RPC manager is
+        # subscribed to, so only honour the configured one.
+        if ctx.channel.name != self.config.rpc_channel.value:
+            raise rpc.RPCError(
+                "WRONG_CHANNEL", f"exec is served on {self.config.rpc_channel.value}"
+            )
         if not isinstance(payload, dict):
             raise rpc.RPCError("INVALID_PARAMS", "payload must be an object")
         command = payload.get("command")

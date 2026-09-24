@@ -8,7 +8,7 @@ have that.
 
 ## RPC
 
-Channel `dv-rpc`, method `exec`. Pass `app_key` to target this install.
+Channel `dv-assistant-gateway` (config `rpc_channel`, advanced), method `exec`. Pass `app_key` to target this install.
 
 | Param     | Type   | Default          | Notes                                     |
 |-----------|--------|------------------|-------------------------------------------|
@@ -53,7 +53,7 @@ Cancelling the command from the site kills it.
 ```python
 result = await self.rpc.call(
     "exec", {"command": "uptime && df -h /"},
-    app_key="assistant_gateway_1", timeout=60,
+    channel="dv-assistant-gateway", app_key="assistant_gateway_1", timeout=60,
 )
 ```
 
@@ -61,6 +61,7 @@ result = await self.rpc.call(
 
 | Field              | Default | Notes                                             |
 |--------------------|---------|---------------------------------------------------|
+| `rpc_channel`      | `dv-assistant-gateway` | Advanced; channel `exec` is served on |
 | `run_on_host`      | true    | false runs inside the container instead           |
 | `default_timeout`  | 60      | Seconds                                           |
 | `max_timeout`      | 600     | Upper bound on any requested timeout              |

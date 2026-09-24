@@ -20,6 +20,7 @@ class FakeConfig:
             max_timeout=10.0,
             stream_interval=0.1,
             max_output_bytes=1024,
+            rpc_channel="dv-assistant-gateway",
         )
         values.update(overrides)
         for k, v in values.items():
@@ -43,10 +44,16 @@ class FakeTags:
             setattr(self, name, FakeTag())
 
 
+class FakeChannel:
+    def __init__(self, name):
+        self.name = name
+
+
 class FakeCtx:
     actor = None
 
-    def __init__(self):
+    def __init__(self, channel="dv-assistant-gateway"):
+        self.channel = FakeChannel(channel)
         self._cancelled = asyncio.Event()
         self.progress_calls = []
 
@@ -97,6 +104,11 @@ async def test_exec_no_stream_when_disabled(app, monkeypatch):
 async def test_exec_rejects_bad_params(app, payload):
     with pytest.raises(rpc.RPCError):
         await app.rpc_exec(FakeCtx(), payload)
+
+
+async def test_exec_rejects_other_channels(app):
+    with pytest.raises(rpc.RPCError):
+        await app.rpc_exec(FakeCtx(channel="dv-rpc"), {"command": "true"})
 
 
 async def test_timeout_capped(app):
