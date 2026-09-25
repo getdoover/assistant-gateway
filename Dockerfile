@@ -7,9 +7,14 @@
 # base image -- the builder always runs on $BUILDPLATFORM and only the Rust
 # target triple changes. Same recipe as doover-tunnels / doover-app-controller.
 #
-# The final image is busybox rather than scratch: host commands run the host's
+# The final image is Alpine rather than scratch: host commands run the host's
 # own /bin/sh (the binary joins PID 1's namespaces itself, no nsenter needed),
-# but `run_on_host: false` runs commands in here, and that needs a shell.
+# but container-mode commands (`exec` with `where: "container"`, and
+# `scan_network`) run in here, and need a shell plus the diagnostic tools
+# (nmap, arp-scan, nmcli, mbpoll, ...). Those tools come from Alpine packages,
+# installed per target arch -- CI sets up QEMU, so `RUN apk add` works for
+# every platform. mbpoll isn't packaged, so it's built from source in its own
+# (target-arch) stage against libmodbus.
 #
 # Build one arch locally:
 #   docker buildx build --platform linux/arm64 -t assistant-gateway:local --load .
@@ -62,11 +67,34 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ag-registry-${TARGETA
     cargo zigbuild --release --locked --target "$TRIPLE"; \
     cp "target/${TRIPLE}/release/assistant-gateway" /assistant-gateway
 
-## FINAL IMAGE ##
-FROM busybox:1-musl AS final_image
+## MBPOLL STAGE (runs on $TARGETPLATFORM) ##
+FROM alpine:3 AS mbpoll
+ARG MBPOLL_VERSION=1.5.4
+# A tagged git clone rather than the release tarball: mbpoll's CMake takes its
+# version from `git describe` (run in cmake's cwd, hence the `cd`), and
+# reports 1.0-0 without it.
+RUN apk add --no-cache build-base cmake git libmodbus-dev pkgconf
+RUN set -eux; \
+    git clone --depth 1 --branch "v${MBPOLL_VERSION}" https://github.com/epsilonrt/mbpoll.git /tmp/mbpoll; \
+    cd /tmp/mbpoll; \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release; \
+    cmake --build build -j"$(nproc)"; \
+    install -m 0755 "$(find build -type f -name mbpoll -perm -u+x | head -1)" /usr/local/bin/mbpoll; \
+    /usr/local/bin/mbpoll -V
+
+## FINAL IMAGE (runs on $TARGETPLATFORM) ##
+FROM alpine:3 AS final_image
 LABEL com.doover.app="true"
 LABEL com.doover.managed="true"
 
+# Diagnostic tools for container-mode commands. busybox (in the base image)
+# still provides wget for the HEALTHCHECK. iproute2 because busybox `ip` has
+# no `-j`. libmodbus is mbpoll's runtime library.
+RUN apk add --no-cache \
+        networkmanager-cli nmap arp-scan socat iputils iproute2 curl jq \
+        busybox-extras ca-certificates libmodbus
+
+COPY --from=mbpoll /usr/local/bin/mbpoll /usr/local/bin/mbpoll
 COPY --from=builder /assistant-gateway /assistant-gateway
 
 HEALTHCHECK --interval=30s --timeout=2s --start-period=5s \

@@ -5,9 +5,22 @@ services:
     # pid: host + privileged let the app join the host's namespaces (setns into
     # PID 1's), so commands run on the host as root rather than inside this
     # container.
+    #
+    # privileged also gives the container the host's /dev (serial ports such as
+    # /dev/ttyUSB0 and /dev/ttyAMA0 included, and devices plugged in later), so
+    # container-mode tools like mbpoll can reach RS-485 adapters without any
+    # `devices:` entries.
     privileged: true
     pid: host
+    # Container-mode tools (nmap, arp-scan, ping, curl) see the host's
+    # interfaces.
     network_mode: host
     environment:
       - APP_KEY=$APP_KEY
       - HEALTHCHECK_PORT=$HEALTHCHECK_PORT
+      # For the container's own nmcli, should anything use it; host-mode nmcli
+      # talks to the host's bus directly.
+      - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
+    volumes:
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+      - /etc/machine-id:/etc/machine-id:ro  # helps D-Bus identify the machine

@@ -3,5 +3,7 @@
 
 pub mod app;
 pub mod config;
+pub mod diag;
 pub mod executor;
+pub mod parse;
 pub mod tags;

@@ -2,11 +2,11 @@ use doover::Config;
 
 #[derive(Debug, Clone, Config)]
 pub struct AssistantGatewayConfig {
-    /// Channel this app listens on for exec requests.
+    /// Channel this app listens on for exec and diagnostic requests.
     #[config(title = "RPC Channel", default = "dv-assistant-gateway", advanced)]
     pub rpc_channel: String,
 
-    /// Run commands in the host's namespaces (joining PID 1's) rather than inside this container. Needs the container to run privileged with pid: host.
+    /// Run commands in the host's namespaces (joining PID 1's) rather than inside this container. Needs the container to run privileged with pid: host. An exec call's `where` overrides this; when off, the diagnostic methods use only the container's tools.
     #[config(default = true)]
     pub run_on_host: bool,
 

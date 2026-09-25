@@ -99,12 +99,21 @@ pub fn build_script(command: &str, cwd: Option<&str>) -> String {
 }
 
 /// Python's `shlex.quote`.
-fn shell_quote(s: &str) -> String {
+pub fn shell_quote(s: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c);
     if !s.is_empty() && s.chars().all(safe) {
         return s.to_string();
     }
     format!("'{}'", s.replace('\'', r#"'"'"'"#))
+}
+
+/// An argv as one `sh -c` command line, every word quoted: how the typed
+/// methods run fixed tools through the same path as `exec`.
+pub fn shell_join<S: AsRef<str>>(argv: &[S]) -> String {
+    argv.iter()
+        .map(|a| shell_quote(a.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Keep draining past the limit, or a chatty command blocks on a full pipe.
