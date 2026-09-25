@@ -6,10 +6,13 @@ so this app is effectively remote root shell access to the device. Install it
 only on devices where everyone who can write to the device's channels should
 have that.
 
-It also serves typed, read-only network diagnostics (`net_status`,
-`net_wifi_scan`, `scan_network`) that return structured JSON, for callers
-such as the platform's AI assistant that shouldn't need a free-form shell to
-commission a device.
+It also serves typed methods that return structured JSON, for callers such
+as the platform's AI assistant that shouldn't need a free-form shell to
+commission a device: read-only network diagnostics (`net_status`,
+`net_wifi_scan`, `scan_network`), network changes that roll themselves back
+if they cut the device off (`net_apply`), and Modbus RTU/TCP access to the
+equipment the device is wired to (`probe_modbus`, `read_modbus`,
+`write_modbus`).
 
 ## RPC
 
@@ -22,6 +25,10 @@ Channel `dv-assistant-gateway` (config `rpc_channel`, advanced). Pass
 | `net_status`    | host      | Interfaces, routes, DNS, wifi, modem, reachability|
 | `net_wifi_scan` | host      | Visible wifi networks                             |
 | `scan_network`  | container | Hosts on the LAN (ARP + ping sweep), open ports   |
+| `net_apply`     | host      | One NetworkManager change, checkpointed; rolls back unless the platform stays reachable |
+| `probe_modbus`  | container | Which Modbus unit ids answer                      |
+| `read_modbus`   | container | Registers / coils / inputs from one unit          |
+| `write_modbus`  | container | One holding register or coil, read back           |
 
 \* per `where`, defaulting to config `run_on_host`.
 
@@ -33,7 +40,7 @@ privileged, its `/dev`, so container tools see the host's interfaces and
 serial ports.
 
 Invalid parameters fail with `INVALID_PARAMS` before the call is acknowledged
-or anything runs. All methods stream progress while they run (see
+or anything runs; the typed methods refuse unknown parameter names too. All methods stream progress while they run (see
 [Streaming](#streaming)) and can be cancelled from the site.
 
 ### `exec`
@@ -79,7 +86,8 @@ the main table has no default route), `resolvectl status` or else
 --rescan no` when there's a wifi device, `mmcli -J -L` / `-m <n>` / `-b <n>`.
 Checks: `ping -c 1 -W 2` the default gateway and `1.1.1.1`,
 `getent hosts api.doover.com`, and
-`curl -sS -o /dev/null -m 5 -w %{http_code} https://api.doover.com/`.
+`curl -sS -I -o /dev/null -m 5 -w %{http_code} https://api.doover.com/`
+(the same check `net_apply` verifies with).
 
 ```json
 {
@@ -179,6 +187,184 @@ nmap's reverse DNS; hosts only nmap found (the device itself, say) have
 `mac: null`. Fails with `SCAN_FAILED` only when neither arp-scan nor nmap
 ran.
 
+### `net_apply`
+
+Makes one NetworkManager change with `nmcli`, on the host, under a
+**NetworkManager checkpoint** so that a change which cuts the device off from
+the platform undoes itself. Only one `net_apply` runs at a time (a second
+fails with `BUSY`).
+
+| Param            | Type   | Default | Notes |
+|------------------|--------|---------|-------|
+| `op`             | string | required | `wifi_connect`, `ipv4`, `dns`, `interface`, `lte`, `connection` |
+| `rollback_after` | number | 90      | Seconds before NetworkManager rolls back; clamped to 30-300 |
+
+Per op (all other parameter names are refused):
+
+| `op`           | Params | Runs |
+|----------------|--------|------|
+| `wifi_connect` | `ssid` (1-32 bytes), `password`? (8-64 chars), `interface`? | `nmcli -w W dev wifi connect <ssid> [password <pw>] [ifname <if>]` |
+| `ipv4`         | `connection` \| `interface`, `method` (`"auto"` \| `"manual"`), manual: `address` (`"a.b.c.d/nn"`, or `"a.b.c.d"` + `prefix`), `gateway`?; either: `dns`? (0-4 IPv4) | `nmcli con mod <con> ipv4.method manual ipv4.addresses <a/nn> ipv4.gateway <gw or ""> [ipv4.dns "<d1 d2>"]` (auto: `ipv4.method auto ipv4.addresses "" ipv4.gateway ""`), then `nmcli -w W con up <con>` |
+| `dns`          | `connection` \| `interface`, `servers` (1-4 IPv4) | `nmcli con mod <con> ipv4.dns "<s1 s2>" ipv4.ignore-auto-dns yes`, then `con up` |
+| `interface`    | `name`, `state` (`"up"` \| `"down"`) | `nmcli -w W dev connect\|disconnect <name>` |
+| `lte`          | `apn`, `user`?, `password`?, `connection`? | `nmcli con mod <gsm con> gsm.apn <apn> [gsm.username ..] [gsm.password ..]`, or with no gsm profile (or no profile named `connection`) `nmcli con add type gsm ifname '*' con-name <connection or "lte"> gsm.apn <apn> ...`; then `con up` |
+| `connection`   | `name`, `state` (`"up"` \| `"down"`) | `nmcli -w W con up\|down <name>` |
+
+`interface` for `ipv4`/`dns` means the connection active on it, looked up
+first with `nmcli -t -f NAME,DEVICE con show --active` (`NO_CONNECTION` if
+there's none). `W`, nmcli's activation wait, is `rollback_after - 20` held to
+10-45 s, leaving time to verify. Interface names are `[A-Za-z0-9_.:-]{1,64}`;
+connection names the same plus spaces (NetworkManager's own defaults are
+"Wired connection 1"); APNs `[A-Za-z0-9._-]`; SSIDs and passwords can be any
+text without control characters or a leading `-`. Every value is one quoted
+argument (`shell_join`), never shell syntax. IPv6 DNS servers are refused
+(`ipv4.dns` takes IPv4 only).
+
+**What happens:**
+
+1. Look up the connection (above), then create a checkpoint over D-Bus:
+   `busctl call org.freedesktop.NetworkManager /org/freedesktop/NetworkManager
+   org.freedesktop.NetworkManager CheckpointCreate aouu 0 <rollback_after> 2`
+   -- every device, flag 2 = delete connections made after it, so a wifi or
+   LTE profile added by a rolled-back change is removed too. Without
+   `busctl` (exit 127 on host and container), `dbus-send --system
+   --print-reply ... CheckpointCreate array:objpath: uint32:<t> uint32:2`.
+   With neither, the call fails with `NO_CHECKPOINT` and nothing changes --
+   except `interface`/`connection` with `state: "up"`, which can't cut the
+   device off and go ahead without one (`checkpoint: false`). If
+   NetworkManager refuses the checkpoint (another is pending, access
+   denied): `CHECKPOINT_FAILED`, nothing changes.
+2. Run the op's nmcli commands. If one fails: `CheckpointRollback` at once,
+   result `applied: false, rolled_back: true, reason: <nmcli's error>`.
+3. Verify: the platform check (`curl -I https://api.doover.com/`, 5 s) every
+   3 s until it answers (any HTTP status) or until `rollback_after - 10` s
+   after the checkpoint.
+4. It answered: `CheckpointDestroy`, which keeps the change -- `applied:
+   true, verified: true`.
+5. It never answered: the checkpoint is left alone and NetworkManager rolls
+   the change back itself when the timer fires (this app waits until
+   `rollback_after + 2` s, then checks the checkpoint is gone from
+   NetworkManager's `Checkpoints`, and rolls back explicitly if it isn't) --
+   `applied: false, rolled_back: true, reason: "platform unreachable after
+   apply (...)"`.
+
+The rollback is NetworkManager's, so it happens even if this app, its
+container or the RPC dies mid-change. Cancelling the call stops it where it
+is (no destroy), so a pending checkpoint rolls back at its deadline.
+Progress steps: `Checkpoint created (rollback in 90s)`, `Applying ipv4 on
+eth0`, `Verifying platform reachability`, `Waiting for NetworkManager to roll
+back`, then `net_status`'s own.
+
+```json
+{"applied": true, "verified": true, "rolled_back": false, "checkpoint": true,
+ "reason": null, "status": { ...net_status... }}
+```
+
+```json
+{"applied": false, "verified": false, "rolled_back": true, "checkpoint": true,
+ "reason": "platform unreachable after apply (curl: exit 6: curl: (6) Could not resolve host: api.doover.com)",
+ "status": { ...net_status, after the rollback... }}
+```
+
+`status` is always a fresh `net_status`, read after the outcome. Without a
+checkpoint (the "up" ops only), a failed verify leaves the change and says
+so: `applied: true, verified: false, rolled_back: false`.
+
+Errors: `INVALID_PARAMS`, `BUSY`, `NO_CONNECTION`, `APPLY_FAILED` (the
+connection lookup couldn't run nmcli), `NO_CHECKPOINT`, `CHECKPOINT_FAILED`.
+An apply or verify failure is a successful call with `applied: false`, not an
+error.
+
+### Modbus: `probe_modbus`, `read_modbus`, `write_modbus`
+
+Modbus RTU (serial) or TCP through `mbpoll`, in the container (the host
+doesn't ship it; the privileged container sees the host's serial ports and
+network). One Modbus call at a time (`BUSY` otherwise): a serial bus has one
+master. Registers are 0-based PDU addresses (`mbpoll -0`): holding register
+40001 is `register: 0`.
+
+Link parameters (all three methods):
+
+| Param       | Type   | Default | Notes |
+|-------------|--------|---------|-------|
+| `transport` | string | required | `"rtu"` or `"tcp"` |
+| `port`      | string | rtu: required | `/dev/tty` + letters/digits (`/dev/ttyUSB0`, `/dev/ttyAMA0`); must exist, else `PORT_NOT_FOUND` |
+| `baud`      | int    | 9600    | rtu; 1200-921600, standard rates |
+| `parity`    | string | `"none"` | rtu; `"none"`/`"even"`/`"odd"` (or `N`/`E`/`O`). Always passed: mbpoll's own default is even |
+| `stop_bits` | int    | 1       | rtu; 1 or 2 |
+| `data_bits` | int    | 8       | rtu; 7 or 8 |
+| `host`      | string | tcp: required | IPv4 address or hostname |
+| `tcp_port`  | int    | 502     | tcp |
+| `timeout`   | number | 1       | Seconds to wait for a reply; at most 5 |
+
+Settings for the other transport are ignored. `kind` is `"holding"`
+(default), `"input"`, `"coil"` or `"discrete"` (mbpoll `-t 4`/`3`/`0`/`1`);
+register values are 0-65535, coils and discrete inputs `true`/`false`.
+
+mbpoll runs as `mbpoll -m rtu -b <baud> -P <parity> -s <stop> -d <data>`
+(or `-m tcp -p <tcp_port>`) `-a <unit> -0 -r <register> -c <count> -t <kind>
+-o <timeout> -1 -q <port|host>`; a write drops `-c` and appends the value.
+
+#### `probe_modbus`
+
+Which unit ids answer: reads `count` values at `register` from each.
+
+| Param      | Type  | Default | Notes |
+|------------|-------|---------|-------|
+| `unit_ids` | array | `[1]`   | Up to 32; 1-247 (tcp: 0-247); duplicates dropped |
+| `register` | int   | 0       | |
+| `count`    | int   | 1       | 1-16 |
+| `kind`     | string | `"holding"` | |
+
+```json
+{"results": [
+   {"unit_id": 1, "ok": true, "values": [1, 101]},
+   {"unit_id": 2, "ok": false, "error": "Read output (holding) register failed: Operation timed out"},
+   {"unit_id": 3, "ok": false, "error": "Read output (holding) register failed: Illegal data address", "exception": true}
+ ],
+ "attempted": 3, "answered": 2, "errors": []}
+```
+
+`error` is mbpoll's. `exception: true` marks a Modbus exception reply: the
+unit is there, the register or function isn't -- `answered` counts those as
+well as `ok` ones. A link failure (`Connection failed: ...`: port can't be
+opened, host refuses or doesn't answer) stops the probe, is noted in
+`errors` (`"10.0.0.9: Connection failed: Connection refused"`), and leaves
+the rest unattempted. Progress: `Probing unit 3/12`.
+
+#### `read_modbus`
+
+`unit_id` (required), `register` (default 0), `count` (1-125, default 1),
+`kind`:
+
+```json
+{"unit_id": 1, "register": 8, "kind": "input", "values": [801, 65535]}
+```
+
+Fails with `MODBUS_FAILED` and mbpoll's message (`"Read output (holding)
+register failed: Operation timed out"`, `"Connection failed: Connection
+refused"`, ...).
+
+#### `write_modbus`
+
+One holding register or coil: `unit_id`, `register` (both required), `kind`
+(`"holding"` default, or `"coil"`), `value` (holding: integer 0-65535; coil:
+`true`/`false`, or 0/1). Arrays, `count` other than 1, and the read-only kinds
+are refused (`INVALID_PARAMS`). After a successful write the value is read
+back:
+
+```json
+{"ok": true, "unit_id": 1, "register": 5, "kind": "holding", "value": 1234, "readback": 1234}
+```
+
+A failed read-back leaves out `readback` and adds `readback_error` (the
+write itself succeeded). A refused write is `MODBUS_FAILED` (`"Write output
+(holding) register failed: Illegal data address"`). Progress: `Writing
+register 40006 on unit 1` (Modicon numbering; coils `coil N`).
+
+Modbus errors: `INVALID_PARAMS`, `PORT_NOT_FOUND`, `BUSY`, `MODBUS_FAILED`
+(including `mbpoll ...: not found on container`).
+
 ### Streaming
 
 While a command runs, its output so far is written back to the command
@@ -233,8 +419,9 @@ hosts = await self.rpc.call(
 
 ## Telemetry tags
 
-`commands_run` (every call), `last_method`, `last_run_ts`, and `exec`'s
-`last_command` and `last_exit_code`.
+`commands_run` (every call), `last_method` (`exec`, `net_apply`,
+`write_modbus`, ...), `last_run_ts`, and `exec`'s `last_command` and
+`last_exit_code`.
 
 ## Deployment
 
@@ -259,7 +446,9 @@ cargo run -- export doover_config.json --app-name assistant_gateway   # preview 
 docker buildx build --platform linux/arm64 -t assistant-gateway:local --load .
 ```
 
-The diagnostics' tests run against fake tools on PATH. To see the parsers on
+The typed methods' tests run against fake tools on PATH (`net_apply`'s and
+the Modbus ones per test, via `Gateway::with_tool_env`, with `net_apply`'s
+waits shrunk by `NetTiming`). To see the parsers on
 real tool output (Linux, privileged, host network):
 
 ```bash
