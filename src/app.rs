@@ -1,5 +1,6 @@
-//! The RPC handlers (`exec` and the typed diagnostics in [`crate::diag`]) and
-//! progress streaming via `ctx.progress()`.
+//! The RPC handlers (`exec`, the typed diagnostics in [`crate::diag`],
+//! `net_apply` in [`crate::netapply`], the Modbus methods in
+//! [`crate::modbus`]) and progress streaming via `ctx.progress()`.
 
 use std::future::Future;
 use std::io;
@@ -16,6 +17,8 @@ use tokio::task::{JoinError, JoinHandle};
 use crate::config::AssistantGatewayConfig;
 use crate::diag::{self, Runner, ScanParams, Step};
 use crate::executor::{run_command, CommandResult, CommandSpec, LiveOutput};
+use crate::modbus::{self, ProbeParams, ReadParams, WriteParams};
+use crate::netapply::{self, NetApplyParams, NetTiming};
 use crate::tags::AssistantGatewayTags;
 
 /// Longest gap between progress updates even with no new output, so the site
@@ -32,6 +35,21 @@ pub struct Gateway {
     config: RwLock<AssistantGatewayConfig>,
     tags: AssistantGatewayTags,
     heartbeat: Duration,
+    net_timing: NetTiming,
+    /// Extra environment for the typed methods' tools.
+    tool_env: Vec<(String, String)>,
+    /// One network change at a time: a second checkpoint over the same
+    /// devices would be refused by NetworkManager anyway.
+    net_lock: tokio::sync::Mutex<()>,
+    /// One Modbus exchange at a time: a serial bus has one master.
+    modbus_lock: tokio::sync::Mutex<()>,
+}
+
+fn busy(what: &str) -> RpcError {
+    RpcError::new(
+        "BUSY",
+        format!("another {what} is in progress on this device"),
+    )
 }
 
 impl Gateway {
@@ -40,11 +58,28 @@ impl Gateway {
             config: RwLock::new(config),
             tags,
             heartbeat: HEARTBEAT_INTERVAL,
+            net_timing: NetTiming::default(),
+            tool_env: Vec::new(),
+            net_lock: tokio::sync::Mutex::new(()),
+            modbus_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     pub fn with_heartbeat(mut self, heartbeat: Duration) -> Self {
         self.heartbeat = heartbeat;
+        self
+    }
+
+    /// Shrink `net_apply`'s waits (tests).
+    pub fn with_net_timing(mut self, timing: NetTiming) -> Self {
+        self.net_timing = timing;
+        self
+    }
+
+    /// Extra environment for every typed method's tools (tests put fakes
+    /// first on PATH this way, per gateway).
+    pub fn with_tool_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.tool_env = env;
         self
     }
 
@@ -77,6 +112,26 @@ impl Gateway {
         rpc.register(Some(channel), "scan_network", move |ctx, payload| {
             let gateway = gateway.clone();
             async move { gateway.scan_network(ctx, payload).await }
+        });
+        let gateway = self.clone();
+        rpc.register(Some(channel), "net_apply", move |ctx, payload| {
+            let gateway = gateway.clone();
+            async move { gateway.net_apply(ctx, payload).await }
+        });
+        let gateway = self.clone();
+        rpc.register(Some(channel), "probe_modbus", move |ctx, payload| {
+            let gateway = gateway.clone();
+            async move { gateway.probe_modbus(ctx, payload).await }
+        });
+        let gateway = self.clone();
+        rpc.register(Some(channel), "read_modbus", move |ctx, payload| {
+            let gateway = gateway.clone();
+            async move { gateway.read_modbus(ctx, payload).await }
+        });
+        let gateway = self.clone();
+        rpc.register(Some(channel), "write_modbus", move |ctx, payload| {
+            let gateway = gateway.clone();
+            async move { gateway.write_modbus(ctx, payload).await }
         });
     }
 
@@ -270,6 +325,73 @@ impl Gateway {
         .await
     }
 
+    /// One NetworkManager change under a checkpoint that rolls it back unless
+    /// the platform stays reachable. See [`netapply`].
+    pub async fn net_apply(
+        &self,
+        ctx: RpcContext,
+        payload: Value,
+    ) -> std::result::Result<Value, RpcError> {
+        let params = NetApplyParams::parse(&payload)?;
+        let _one_at_a_time = self.net_lock.try_lock().map_err(|_| busy("net_apply"))?;
+        let timing = self.net_timing;
+        self.typed(ctx, "net_apply", |runner, step| async move {
+            netapply::net_apply(&runner, &step, params, timing).await
+        })
+        .await
+    }
+
+    /// Which Modbus unit ids answer on a serial port or TCP host.
+    pub async fn probe_modbus(
+        &self,
+        ctx: RpcContext,
+        payload: Value,
+    ) -> std::result::Result<Value, RpcError> {
+        let params = ProbeParams::parse(&payload)?;
+        let _one_at_a_time = self
+            .modbus_lock
+            .try_lock()
+            .map_err(|_| busy("Modbus call"))?;
+        self.typed(ctx, "probe_modbus", |runner, step| async move {
+            modbus::probe_modbus(&runner, &step, params).await
+        })
+        .await
+    }
+
+    /// Registers, coils or inputs from one Modbus unit.
+    pub async fn read_modbus(
+        &self,
+        ctx: RpcContext,
+        payload: Value,
+    ) -> std::result::Result<Value, RpcError> {
+        let params = ReadParams::parse(&payload)?;
+        let _one_at_a_time = self
+            .modbus_lock
+            .try_lock()
+            .map_err(|_| busy("Modbus call"))?;
+        self.typed(ctx, "read_modbus", |runner, step| async move {
+            modbus::read_modbus(&runner, &step, params).await
+        })
+        .await
+    }
+
+    /// One holding register or coil, read back after writing.
+    pub async fn write_modbus(
+        &self,
+        ctx: RpcContext,
+        payload: Value,
+    ) -> std::result::Result<Value, RpcError> {
+        let params = WriteParams::parse(&payload)?;
+        let _one_at_a_time = self
+            .modbus_lock
+            .try_lock()
+            .map_err(|_| busy("Modbus call"))?;
+        self.typed(ctx, "write_modbus", |runner, step| async move {
+            modbus::write_modbus(&runner, &step, params).await
+        })
+        .await
+    }
+
     /// The shared shape of a typed method: acknowledge, run `body` while
     /// reporting its current step as progress, record it, and leave a
     /// cancellation standing.
@@ -288,7 +410,8 @@ impl Gateway {
             tracing::warn!("failed to acknowledge {method}: {e}");
         }
         let step = Step::new("Starting");
-        let runner = Runner::new(ctx.clone(), self.config().run_on_host);
+        let runner =
+            Runner::new(ctx.clone(), self.config().run_on_host).with_env(self.tool_env.clone());
         let result = self
             .with_progress(&ctx, &step, body(runner, step.clone()))
             .await;

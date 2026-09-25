@@ -1,13 +1,16 @@
 //! Parsers for the diagnostic tools' output (nmcli terse mode, `ip -j`,
 //! resolvectl, mmcli, arp-scan, nmap grepable) and validators for the typed
-//! methods' parameters. Pure functions; nothing here runs anything.
+//! methods' parameters, including [`Params`], the strict object reader
+//! `net_apply` and the Modbus methods use. Pure functions; nothing here runs
+//! anything. (`net_apply`'s and mbpoll's own parsers live with them, in
+//! `netapply.rs` / `modbus.rs`.)
 
 use std::collections::HashMap;
 use std::fmt;
 use std::net::Ipv4Addr;
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 // -- nmcli -------------------------------------------------------------------
 
@@ -685,6 +688,104 @@ pub fn valid_interface(s: &str) -> bool {
         && s != ".."
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "_.:@-".contains(c))
+}
+
+/// A typed method's parameter object, read strictly: every key must be one
+/// the method knows ([`Params::only`]), and each getter checks its type.
+/// Errors are the `INVALID_PARAMS` message.
+pub struct Params<'a>(&'a Map<String, Value>);
+
+impl<'a> Params<'a> {
+    pub fn new(payload: &'a Value) -> Result<Self, String> {
+        static EMPTY: std::sync::OnceLock<Map<String, Value>> = std::sync::OnceLock::new();
+        match payload {
+            Value::Object(m) => Ok(Self(m)),
+            Value::Null => Ok(Self(EMPTY.get_or_init(Map::new))),
+            _ => Err("payload must be an object".into()),
+        }
+    }
+
+    /// Refuse any key not in `known`.
+    pub fn only(&self, known: &[&str]) -> Result<(), String> {
+        let unknown: Vec<&str> = self
+            .0
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !known.contains(k))
+            .collect();
+        if unknown.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("unexpected parameter(s): {}", unknown.join(", ")))
+        }
+    }
+
+    pub fn has(&self, key: &str) -> bool {
+        !matches!(self.0.get(key), None | Some(Value::Null))
+    }
+
+    pub fn get(&self, key: &str) -> Option<&'a Value> {
+        self.0.get(key).filter(|v| !v.is_null())
+    }
+
+    /// A string, `None` when absent or null. Not trimmed.
+    pub fn str(&self, key: &str) -> Result<Option<&'a str>, String> {
+        match self.get(key) {
+            None => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s)),
+            Some(_) => Err(format!("'{key}' must be a string")),
+        }
+    }
+
+    pub fn required_str(&self, key: &str) -> Result<&'a str, String> {
+        self.str(key)?
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("'{key}' is required"))
+    }
+
+    /// An integer in `lo..=hi` (a whole float such as `9600.0` is accepted).
+    pub fn int(&self, key: &str, lo: i64, hi: i64) -> Result<Option<i64>, String> {
+        let Some(v) = self.get(key) else {
+            return Ok(None);
+        };
+        let n = match v {
+            Value::Number(n) => n
+                .as_i64()
+                .or_else(|| n.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64)),
+            _ => None,
+        };
+        match n {
+            Some(n) if (lo..=hi).contains(&n) => Ok(Some(n)),
+            _ => Err(format!("'{key}' must be an integer {lo} to {hi}")),
+        }
+    }
+
+    pub fn number(&self, key: &str) -> Result<Option<f64>, String> {
+        match self.get(key) {
+            None => Ok(None),
+            Some(Value::Number(n)) => Ok(n.as_f64()),
+            Some(_) => Err(format!("'{key}' must be a number")),
+        }
+    }
+
+    /// One of `choices` (compared case-insensitively), returned lower-cased.
+    pub fn choice(&self, key: &str, choices: &[&str]) -> Result<Option<String>, String> {
+        let Some(s) = self.str(key)? else {
+            return Ok(None);
+        };
+        let s = s.trim().to_ascii_lowercase();
+        if choices.contains(&s.as_str()) {
+            Ok(Some(s))
+        } else {
+            Err(format!("'{key}' must be one of: {}", choices.join(", ")))
+        }
+    }
+}
+
+/// No control characters (a newline or NUL in a value is never legitimate),
+/// and not starting with `-` (every value lands on a tool's command line).
+pub fn safe_text(s: &str) -> bool {
+    !s.starts_with('-') && !s.chars().any(char::is_control)
 }
 
 #[cfg(test)]

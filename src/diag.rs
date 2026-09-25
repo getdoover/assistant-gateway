@@ -1,7 +1,9 @@
 //! The typed diagnostic methods: `net_status`, `net_wifi_scan` and
-//! `scan_network`. Each runs fixed tools through [`run_command`] -- the same
-//! spawn path as `exec`, on the host or in the container -- and parses their
-//! output into JSON with [`crate::parse`].
+//! `scan_network`, plus the [`Runner`] every typed method (these, and
+//! [`crate::netapply`] / [`crate::modbus`]) runs its tools with. Each runs
+//! fixed tools through [`run_command`] -- the same spawn path as `exec`, on
+//! the host or in the container -- and parses their output into JSON with
+//! [`crate::parse`].
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -18,7 +20,7 @@ use crate::parse::{self, IpLink, Route, Subnet};
 /// Output captured per tool. Internal only (it's parsed, not returned), so
 /// generous: an nmap sweep of a /22 is tens of KB.
 const TOOL_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
-const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
 const WIFI_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 /// The whole of `scan_network`: discovery plus the optional port scan.
 pub const SCAN_BUDGET: Duration = Duration::from_secs(60);
@@ -85,15 +87,34 @@ pub struct Runner {
     /// `run_on_host`: when false, nothing enters the host's namespaces and
     /// [`Place::HostThenContainer`] means the container.
     allow_host: bool,
+    /// Extra environment for every tool (tests point PATH at fakes).
+    env: Vec<(String, String)>,
 }
 
 impl Runner {
     pub fn new(ctx: RpcContext, allow_host: bool) -> Self {
-        Self { ctx, allow_host }
+        Self {
+            ctx,
+            allow_host,
+            env: Vec::new(),
+        }
+    }
+
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
     }
 
     pub fn cancelled(&self) -> bool {
         self.ctx.is_cancelled()
+    }
+
+    /// Sleep, waking early if the request is cancelled.
+    pub async fn sleep(&self, duration: Duration) {
+        tokio::select! {
+            _ = tokio::time::sleep(duration) => {}
+            _ = self.ctx.wait_cancelled() => {}
+        }
     }
 
     /// Run `argv` at `place`. `Err` is a one-line reason ("mmcli: not found
@@ -121,6 +142,7 @@ impl Runner {
             }
             let spec = CommandSpec {
                 command: shell_join(argv),
+                env: self.env.clone(),
                 stdin: stdin.clone(),
                 timeout,
                 run_on_host: on_host,
@@ -172,7 +194,7 @@ impl Runner {
 
 /// A short name for a tool invocation in `errors`: the program and its
 /// subcommand words, e.g. "nmcli con show" or "ip addr".
-fn label(argv: &[&str]) -> String {
+pub(crate) fn label(argv: &[&str]) -> String {
     let mut words = vec![argv[0]];
     words.extend(
         argv[1..]
@@ -184,7 +206,7 @@ fn label(argv: &[&str]) -> String {
 }
 
 /// `Err` describing a run that didn't exit 0.
-fn check(tool: &str, r: &CommandResult) -> Result<(), String> {
+pub(crate) fn check(tool: &str, r: &CommandResult) -> Result<(), String> {
     if r.timed_out {
         return Err(format!("{tool}: timed out after {:.0}s", r.duration));
     }
@@ -403,22 +425,7 @@ pub async fn net_status(runner: &Runner, step: &Step) -> Value {
             &["getent", "hosts", PLATFORM_HOST],
             Duration::from_secs(8)
         ),
-        runner.run(
-            host,
-            &[
-                "curl",
-                "-sS",
-                "-o",
-                "/dev/null",
-                "-m",
-                "5",
-                "-w",
-                "%{http_code}",
-                PLATFORM_URL
-            ],
-            None,
-            Duration::from_secs(8),
-        ),
+        platform_https(runner),
     );
     let gateway_ping = match gw_ping {
         Some(r) => passed(&mut errors, r, "gateway ping"),
@@ -430,19 +437,10 @@ pub async fn net_status(runner: &Runner, step: &Step) -> Value {
     let internet_ping = passed(&mut errors, net_ping, "internet ping");
     let dns_resolve = passed(&mut errors, resolve, "dns resolve");
     let (platform_https, platform_status) = match https {
-        Ok(r) => {
-            let status = r.stdout.trim().parse::<i64>().ok().filter(|s| *s > 0);
-            match check("curl", &r) {
-                Ok(()) => (true, status),
-                Err(e) => {
-                    errors.push(format!("platform https: {e}"));
-                    (false, status)
-                }
-            }
-        }
-        Err(e) => {
+        (Ok(()), status) => (true, status),
+        (Err(e), status) => {
             errors.push(format!("platform https: {e}"));
-            (false, None)
+            (false, status)
         }
     };
 
@@ -461,6 +459,38 @@ pub async fn net_status(runner: &Runner, step: &Step) -> Value {
         },
         "errors": errors,
     })
+}
+
+/// Whether an HTTPS request to the platform completes (any HTTP status: a
+/// HEAD with a 5 s limit), and the status it got. Shared by `net_status`'s
+/// check and `net_apply`'s verification.
+pub(crate) async fn platform_https(runner: &Runner) -> (Result<(), String>, Option<i64>) {
+    let r = runner
+        .run(
+            Place::HostThenContainer,
+            &[
+                "curl",
+                "-sS",
+                "-I",
+                "-o",
+                "/dev/null",
+                "-m",
+                "5",
+                "-w",
+                "%{http_code}",
+                PLATFORM_URL,
+            ],
+            None,
+            Duration::from_secs(8),
+        )
+        .await;
+    match r {
+        Ok(r) => (
+            check("curl", &r),
+            r.stdout.trim().parse::<i64>().ok().filter(|s| *s > 0),
+        ),
+        Err(e) => (Err(e), None),
+    }
 }
 
 fn note<T>(errors: &mut Vec<String>, r: Result<T, String>) -> Option<T> {
@@ -544,7 +574,7 @@ pub struct ScanParams {
     pub ports: Option<String>,
 }
 
-fn invalid(message: impl Into<String>) -> RpcError {
+pub(crate) fn invalid(message: impl Into<String>) -> RpcError {
     RpcError::new("INVALID_PARAMS", message)
 }
 
