@@ -34,7 +34,8 @@ Channel `dv-assistant-gateway` (config `rpc_channel`, advanced). Pass
 
 "host" means the host's namespaces and binaries; "container" means this
 app's Alpine image, which ships `nmap`, `arp-scan`, `nmcli`, `mbpoll`,
-`socat`, `ping`, `ip`, `curl`, `jq` and busybox-extras (`telnet`, ...). The
+`socat`, `ping`, `ip`, `curl`, `jq`, `dbus-send` and busybox-extras
+(`telnet`, ...). The
 container shares the host's network (`network_mode: host`) and, being
 privileged, its `/dev`, so container tools see the host's interfaces and
 serial ports.
@@ -229,7 +230,10 @@ argument (`shell_join`), never shell syntax. IPv6 DNS servers are refused
    LTE profile added by a rolled-back change is removed too. Without
    `busctl` (exit 127 on host and container), `dbus-send --system
    --print-reply ... CheckpointCreate array:objpath: uint32:<t> uint32:2`.
-   With neither, the call fails with `NO_CHECKPOINT` and nothing changes --
+   The image ships `dbus-send`, which reaches the host's NetworkManager
+   through the mounted system bus socket, so this works with `run_on_host:
+   false` too. With neither, the call fails with `NO_CHECKPOINT` and nothing
+   changes --
    except `interface`/`connection` with `state: "up"`, which can't cut the
    device off and go ahead without one (`checkpoint: false`). If
    NetworkManager refuses the checkpoint (another is pending, access

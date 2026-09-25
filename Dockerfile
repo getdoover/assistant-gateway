@@ -89,10 +89,12 @@ LABEL com.doover.managed="true"
 
 # Diagnostic tools for container-mode commands. busybox (in the base image)
 # still provides wget for the HEALTHCHECK. iproute2 because busybox `ip` has
-# no `-j`. libmodbus is mbpoll's runtime library.
+# no `-j`. libmodbus is mbpoll's runtime library. dbus (dbus-send) is
+# net_apply's checkpoint fallback when the host has no busctl: it reaches the
+# host's NetworkManager through the mounted system bus socket.
 RUN apk add --no-cache \
         networkmanager-cli nmap arp-scan socat iputils iproute2 curl jq \
-        busybox-extras ca-certificates libmodbus
+        busybox-extras ca-certificates libmodbus dbus
 
 COPY --from=mbpoll /usr/local/bin/mbpoll /usr/local/bin/mbpoll
 COPY --from=builder /assistant-gateway /assistant-gateway
