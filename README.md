@@ -11,8 +11,8 @@ as the platform's AI assistant that shouldn't need a free-form shell to
 commission a device: read-only network diagnostics (`net_status`,
 `net_wifi_scan`, `scan_network`), network changes that roll themselves back
 if they cut the device off (`net_apply`), and Modbus RTU/TCP access to the
-equipment the device is wired to (`probe_modbus`, `read_modbus`,
-`write_modbus`).
+equipment the device is wired to (`scan_modbus`, `probe_modbus`,
+`read_modbus`, `write_modbus`).
 
 ## RPC
 
@@ -26,6 +26,7 @@ Channel `dv-assistant-gateway` (config `rpc_channel`, advanced). Pass
 | `net_wifi_scan` | host      | Visible wifi networks                             |
 | `scan_network`  | container | Hosts on the LAN (ARP + ping sweep), open ports   |
 | `net_apply`     | host      | One NetworkManager change, checkpointed; rolls back unless the platform stays reachable |
+| `scan_modbus`   | container | Find a Modbus RTU device: every bus port, every unit id, common settings; stops at the first answer |
 | `probe_modbus`  | container | Which Modbus unit ids answer                      |
 | `read_modbus`   | container | Registers / coils / inputs from one unit          |
 | `write_modbus`  | container | One holding register or coil, read back           |
@@ -278,6 +279,49 @@ Errors: `INVALID_PARAMS`, `BUSY`, `NO_CONNECTION`, `APPLY_FAILED` (the
 connection lookup couldn't run nmcli), `NO_CHECKPOINT`, `CHECKPOINT_FAILED`.
 An apply or verify failure is a successful call with `applied: false`, not an
 error.
+
+### Modbus scan: `scan_modbus`
+
+Finds a Modbus RTU device without being told where it is. Native (no
+mbpoll): each port is opened once with raw termios and every unit is sent
+"read holding register 0" with a short reply timeout, about 0.3 s a unit
+instead of mbpoll's ~1 s. The whole range is always scanned; there is no
+parameter for a partial one. Order:
+
+1. **Ports**: every `ttyAMA*` / `ttySC*` (RS-485) first, then `ttyUSB*` /
+   `ttyACM*`. Cellular modems (SimTech, Quectel, Sierra, Telit, u-blox,
+   Huawei, Fibocom, ZTE) and MicroPython boards (by their USB manufacturer /
+   product in sysfs) and the kernel console (`console=` in `/proc/cmdline`)
+   are listed as `skipped`, never opened. Ports are scanned in parallel;
+   units on one port in sequence (RS-485 is half duplex).
+2. **Settings**: 9600 8N1, 9600 8E1, 19200 8N1, 19200 8E1, 38400 8N1,
+   115200 8N1.
+3. **Unit ids**: 1, 247, 2, 246, 3, 245 … 124: all 247.
+
+It stops at the first unit that answers with data **or** a Modbus exception
+(both prove a device is there), on every port. Replies from a different unit
+or that fail their CRC count as `noise`; a port another process holds open
+lists it in `in_use_by` (a second master on the bus garbles replies).
+
+| Param | Type | Default | Notes |
+|-------|------|---------|-------|
+| `hint_unit_ids` | int[] | `[]` | Up to 8 ids (1-247) tried first, e.g. a documented default |
+| `hint_ports` | string[] | `[]` | Ports scanned first |
+| `hint_settings` | object[] | `[]` | `{baud, parity, stop_bits}` tried first |
+| `timeout` | number | 0.3 | Seconds to wait for each reply; 0.05-1 |
+
+Hints only reorder; they never narrow the scan. Holds the Modbus lock
+(`BUSY`). Progress: `Scanning /dev/ttyAMA0 · 9600 8N1 · unit 120/247`.
+
+```json
+{"found": {"port": "/dev/ttyAMA0", "baud": 9600, "parity": "none", "stop_bits": 1,
+           "data_bits": 8, "unit_id": 246, "reply": "exception", "exception_code": 2},
+ "stopped": "found",                     // or "complete", "cancelled", "no_ports"
+ "ports": [{"port": "/dev/ttyAMA0", "in_use_by": ["python (pid 812)"]},
+           {"port": "/dev/ttyUSB0", "skipped": "cellular modem", "usb": "SimTech, Incorporated ..."}],
+ "scanned": [{"port": "/dev/ttyAMA0", "settings_tried": ["9600 8N1"], "units_tried": 4, "noise": 0}],
+ "timeout": 0.3, "duration": 1.3}
+```
 
 ### Modbus: `probe_modbus`, `read_modbus`, `write_modbus`
 

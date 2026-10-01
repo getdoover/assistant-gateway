@@ -19,6 +19,7 @@ use crate::diag::{self, Runner, ScanParams, Step};
 use crate::executor::{run_command, CommandResult, CommandSpec, LiveOutput};
 use crate::modbus::{self, ProbeParams, ReadParams, WriteParams};
 use crate::netapply::{self, NetApplyParams, NetTiming};
+use crate::scan::{self, ModbusScanParams};
 use crate::tags::AssistantGatewayTags;
 
 /// Longest gap between progress updates even with no new output, so the site
@@ -43,6 +44,8 @@ pub struct Gateway {
     net_lock: tokio::sync::Mutex<()>,
     /// One Modbus exchange at a time: a serial bus has one master.
     modbus_lock: tokio::sync::Mutex<()>,
+    /// Where `scan_modbus` finds serial ports (tests use temporary trees).
+    scan_roots: scan::Roots,
 }
 
 fn busy(what: &str) -> RpcError {
@@ -62,7 +65,13 @@ impl Gateway {
             tool_env: Vec::new(),
             net_lock: tokio::sync::Mutex::new(()),
             modbus_lock: tokio::sync::Mutex::new(()),
+            scan_roots: scan::Roots::default(),
         }
+    }
+
+    pub fn with_scan_roots(mut self, roots: scan::Roots) -> Self {
+        self.scan_roots = roots;
+        self
     }
 
     pub fn with_heartbeat(mut self, heartbeat: Duration) -> Self {
@@ -122,6 +131,11 @@ impl Gateway {
         rpc.register(Some(channel), "probe_modbus", move |ctx, payload| {
             let gateway = gateway.clone();
             async move { gateway.probe_modbus(ctx, payload).await }
+        });
+        let gateway = self.clone();
+        rpc.register(Some(channel), "scan_modbus", move |ctx, payload| {
+            let gateway = gateway.clone();
+            async move { gateway.scan_modbus(ctx, payload).await }
         });
         let gateway = self.clone();
         rpc.register(Some(channel), "read_modbus", move |ctx, payload| {
@@ -354,6 +368,26 @@ impl Gateway {
             .map_err(|_| busy("Modbus call"))?;
         self.typed(ctx, "probe_modbus", |runner, step| async move {
             modbus::probe_modbus(&runner, &step, params).await
+        })
+        .await
+    }
+
+    /// Find a Modbus RTU device: every serial port that can be a bus, the
+    /// whole unit range, common settings, stopping at the first answer.
+    pub async fn scan_modbus(
+        &self,
+        ctx: RpcContext,
+        payload: Value,
+    ) -> std::result::Result<Value, RpcError> {
+        let params = ModbusScanParams::parse(&payload)?;
+        let _one_at_a_time = self
+            .modbus_lock
+            .try_lock()
+            .map_err(|_| busy("Modbus call"))?;
+        let roots = self.scan_roots.clone();
+        let watched = ctx.clone();
+        self.typed(ctx, "scan_modbus", |_runner, step| async move {
+            scan::scan_modbus(&roots, &step, params, move || watched.is_cancelled()).await
         })
         .await
     }

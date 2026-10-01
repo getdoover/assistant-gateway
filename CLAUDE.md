@@ -3,7 +3,7 @@
 Doover device app that runs arbitrary `sh` commands on the host over RPC
 (`exec` on `dv-assistant-gateway`), plus typed network diagnostics
 (`net_status`, `net_wifi_scan`, `scan_network`), checkpointed network changes
-(`net_apply`) and Modbus (`probe_modbus`, `read_modbus`, `write_modbus`),
+(`net_apply`) and Modbus (`scan_modbus`, `probe_modbus`, `read_modbus`, `write_modbus`),
 built in Rust on doover-rs.
 See `README.md` for the interface.
 
@@ -25,6 +25,7 @@ src/
   diag.rs       # typed methods: Runner (host/container/fallback over executor), net_status, net_wifi_scan, scan_network, the platform check
   netapply.rs   # net_apply: params, nmcli/busctl/dbus-send argv, checkpoint parsers (unit-tested inline), the checkpoint->apply->verify->destroy/rollback flow
   modbus.rs     # probe/read/write_modbus: params, mbpoll argv, mbpoll output parsers (fixtures from the real mbpoll inline)
+  scan.rs       # scan_modbus: native RTU over raw termios (no mbpoll), port discovery/skipping, the fixed scan order
   parse.rs      # pure parsers (nmcli -t, ip -j, resolvectl, mmcli, arp-scan, nmap -oG) + param validators + `Params` (strict object reader); unit tests inline
   config.rs     # config schema
   tags.rs       # telemetry tags
@@ -35,6 +36,7 @@ tests/
   diag_rpc.rs   # typed methods against fake tools on PATH; `real_tools` (#[ignore]) runs the real ones
   net_apply_rpc.rs # net_apply against fake busctl/dbus-send/nmcli/curl (per-test state via with_tool_env), NetTiming-shrunk waits
   modbus_rpc.rs # Modbus methods against a fake mbpoll that prints the real one's format
+  scan_rpc.rs   # scan_modbus end to end against a fake device on a pseudo-terminal
 ```
 
 ## Things worth knowing
@@ -69,6 +71,8 @@ tests/
   parity), `-0` for 0-based addresses, `-1 -q`; never `-c` on a write (it
   refuses). Quiet mode still prints `-- Polling slave N...`; holding values
   over 32767 print as `65535 (-1)`.
+- `scan_modbus` must only ever cover the whole range: params are hints that
+  reorder (ids, ports, settings), never a list or range to narrow it.
 - `net_apply` and the Modbus methods each hold a `try_lock` for the call
   (`BUSY` for a concurrent one).
 - Tests give each gateway its own tool env (`Gateway::with_tool_env`) rather
