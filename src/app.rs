@@ -25,6 +25,9 @@ use crate::tags::AssistantGatewayTags;
 /// Longest gap between progress updates even with no new output, so the site
 /// doesn't give up on a quiet command as "no response from device".
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+/// How long setup waits for the RPC channel's subscription to sync before
+/// leaving the ready announcement to the main loop.
+pub const READY_SYNC_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn invalid(message: &str) -> RpcError {
     RpcError::new("INVALID_PARAMS", message)
@@ -555,6 +558,45 @@ fn no_params(payload: &Value) -> std::result::Result<(), RpcError> {
 
 pub struct AssistantGatewayApp {
     gateway: Arc<Gateway>,
+    /// `ready_at` has been written for this run of the app.
+    ready: bool,
+}
+
+/// The aggregate written on the RPC channel once requests can reach the
+/// handlers: `ready_at` (unix ms) and the build. Callers wait for a
+/// `ready_at` newer than the deployment they are waiting on.
+pub fn ready_marker(at_ms: u64) -> Value {
+    json!({"ready_at": at_ms, "version": env!("CARGO_PKG_VERSION")})
+}
+
+impl AssistantGatewayApp {
+    /// Write `ready_at` once the RPC channel's subscription has synced: a
+    /// request posted before that is never delivered (handlers see only live
+    /// `MessageCreate` events), so callers wait for this instead of the
+    /// container merely running. Retried from the main loop until it lands.
+    async fn announce_ready(&mut self, ctx: &AppContext, timeout: Duration) {
+        let channel = self.gateway.config().rpc_channel;
+        if !ctx
+            .wait_for_channels_sync(&[channel.as_str()], timeout)
+            .await
+        {
+            if !timeout.is_zero() {
+                tracing::warn!("{channel} did not sync within {timeout:?}; not ready yet");
+            }
+            return;
+        }
+        let at_ms = (unix_now() * 1000.0) as u64;
+        match ctx
+            .update_channel_aggregate(channel.as_str(), &ready_marker(at_ms))
+            .await
+        {
+            Ok(()) => {
+                self.ready = true;
+                tracing::info!("ready: serving RPC on {channel}");
+            }
+            Err(e) => tracing::warn!("failed to write the ready marker on {channel}: {e}"),
+        }
+    }
 }
 
 #[doover::async_trait]
@@ -571,6 +613,7 @@ impl Application for AssistantGatewayApp {
     ) -> Self {
         Self {
             gateway: Arc::new(Gateway::new(config, tags)),
+            ready: false,
         }
     }
 
@@ -581,10 +624,14 @@ impl Application for AssistantGatewayApp {
     async fn setup(&mut self, ctx: &AppContext) -> Result<()> {
         let channel = self.gateway.config().rpc_channel;
         self.gateway.register(ctx.rpc(), &channel);
+        self.announce_ready(ctx, READY_SYNC_TIMEOUT).await;
         Ok(())
     }
 
-    async fn main_loop(&mut self, _ctx: &AppContext) -> Result<()> {
+    async fn main_loop(&mut self, ctx: &AppContext) -> Result<()> {
+        if !self.ready {
+            self.announce_ready(ctx, Duration::ZERO).await;
+        }
         Ok(())
     }
 
@@ -600,5 +647,17 @@ impl Application for AssistantGatewayApp {
         }
         self.gateway.set_config(config);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ready_tests {
+    use super::*;
+
+    #[test]
+    fn ready_marker_carries_the_time_and_build() {
+        let marker = ready_marker(1_791_336_588_846);
+        assert_eq!(marker["ready_at"], 1_791_336_588_846u64);
+        assert_eq!(marker["version"], env!("CARGO_PKG_VERSION"));
     }
 }
