@@ -14,9 +14,8 @@ name = "assistant-gateway"
 path = "src/main.rs"
 
 [dependencies]
-# The Rust equivalent of pydoover, pinned to a revision for reproducible builds
-# (switch to a version tag once doover-rs starts cutting releases).
-doover = { git = "https://github.com/getdoover/doover-rs", rev = "63f3281c4b79c573cacaa14aab37be3969788c80" }
+# The Rust equivalent of pydoover, pinned to a release tag.
+doover = { git = "https://github.com/getdoover/doover-rs", tag = "0.1.5" }
 
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -38,7 +37,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 [dev-dependencies]
-doover = { git = "https://github.com/getdoover/doover-rs", rev = "63f3281c4b79c573cacaa14aab37be3969788c80", features = ["testing"] }
+doover = { git = "https://github.com/getdoover/doover-rs", tag = "0.1.5", features = ["testing"] }
 
 [profile.release]
 lto = true

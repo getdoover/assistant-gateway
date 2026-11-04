@@ -117,7 +117,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "doover"
 version = "0.1.6"
-source = "git+https://github.com/getdoover/doover-rs?rev=63f3281c4b79c573cacaa14aab37be3969788c80#63f3281c4b79c573cacaa14aab37be3969788c80"
+source = "git+https://github.com/getdoover/doover-rs?tag=0.1.5#83566b077cf627fc3b9c944545c417823cfb4166"
 dependencies = [
  "async-trait",
  "doover-macros",
@@ -137,7 +137,7 @@ dependencies = [
 [[package]]
 name = "doover-macros"
 version = "0.1.6"
-source = "git+https://github.com/getdoover/doover-rs?rev=63f3281c4b79c573cacaa14aab37be3969788c80#63f3281c4b79c573cacaa14aab37be3969788c80"
+source = "git+https://github.com/getdoover/doover-rs?tag=0.1.5#83566b077cf627fc3b9c944545c417823cfb4166"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -147,7 +147,7 @@ dependencies = [
 [[package]]
 name = "doover-proto"
 version = "0.1.6"
-source = "git+https://github.com/getdoover/doover-rs?rev=63f3281c4b79c573cacaa14aab37be3969788c80#63f3281c4b79c573cacaa14aab37be3969788c80"
+source = "git+https://github.com/getdoover/doover-rs?tag=0.1.5#83566b077cf627fc3b9c944545c417823cfb4166"
 dependencies = [
  "prost",
  "prost-types",
